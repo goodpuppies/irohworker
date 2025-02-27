@@ -67,8 +67,6 @@ export class IrohMain {
   }
 }
 
-
-
 /**
  * IrohWebWorker:
  * Extends Worker to use Iroh for communication.
@@ -83,6 +81,8 @@ export class IrohWebWorker implements Worker {
   private _worker: Worker | null = null;
   private _remoteNodeId: string | null = null;
   private _workerNodeMessageListeners: ((evt: MessageEvent) => void)[] = [];
+  private _messageCounter: number = 0;
+  private _streamPool: Map<string, any> = new Map();
 
   // Worker interface properties
   onmessage: ((this: Worker, e: MessageEvent) => any) = () => {};
@@ -168,24 +168,42 @@ export class IrohWebWorker implements Worker {
             const conn = await connecting.connect();
             //////console.log("[IrohProtocol] Connected");
             const bi = await conn.acceptBi();
-            //////console.log("[IrohProtocol] Bidirectional stream accepted");
+            
+            // Generate a unique connection ID for tracking
+            const connectionId = `conn_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+            
+            if (isDebugMode()) {
+              console.log(`[IrohProtocol] Bidirectional stream accepted (connection ID: ${connectionId})`);
+            }
 
             try {
               // 1) read the entire request from main
-              //////console.log("[IrohProtocol] Reading request from main");
+              if (isDebugMode()) {
+                console.log(`[IrohProtocol] Reading request from main (connection ID: ${connectionId})`);
+              }
+              
               const MAX_REQUEST_SIZE = 65000; // Setting slightly below the 65536 limit
               const requestBytes = await bi.recv.readToEnd(MAX_REQUEST_SIZE);
               let requestObj: unknown;
+              
               if (requestBytes && requestBytes.length > 0) {
                 const requestText = new TextDecoder().decode(requestBytes);
-                //////console.log(`[IrohProtocol] Received request: ${requestText.substring(0, 100)}${requestText.length > 100 ? '...' : ''}`);
+                
+                if (isDebugMode()) {
+                  console.log(`[IrohProtocol] Received request: size=${requestBytes.length} bytes (connection ID: ${connectionId})`);
+                }
+                
                 requestObj = JSON.parse(requestText);
               } else {
-                //////console.log("[IrohProtocol] Empty request received");
+                if (isDebugMode()) {
+                  console.log(`[IrohProtocol] Empty request received (connection ID: ${connectionId})`);
+                }
               }
 
               // 2) forward the message to the Worker via the original Worker API
-              ////console.log("[IrohProtocol] Forwarding message to Worker");
+              if (isDebugMode()) {
+                console.log(`[IrohProtocol] Forwarding message to Worker (connection ID: ${connectionId})`);
+              }
               
               // Set up a message listener that will forward responses back
               const messageListener = (evt: MessageEvent) => {
@@ -200,11 +218,15 @@ export class IrohWebWorker implements Worker {
                   // Check if response is too large
                   const MAX_RESPONSE_SIZE = 65000; // Setting slightly below the 65536 limit
                   if (respSize > MAX_RESPONSE_SIZE) {
-                    console.error(`[IrohProtocol] Response too large (${respSize} bytes). Maximum size is ${MAX_RESPONSE_SIZE} bytes.`);
+                    const errorMsg = `Response too large (${respSize} bytes). Maximum size is ${MAX_RESPONSE_SIZE} bytes.`;
+                    console.error(`[IrohProtocol] FATAL: ${errorMsg} (connection ID: ${connectionId})`);
+                    
+                    // In debug mode, terminate the process to make the error more visible
+                    terminateInDebugMode(`Oversized response: ${respSize} bytes`);
                     
                     // Send an error message instead
                     const errorResp = this._serializeWithBigInt({
-                      error: `Response too large (${respSize} bytes). Maximum size is ${MAX_RESPONSE_SIZE} bytes.`
+                      error: errorMsg
                     });
                     
                     // Forward the error response asynchronously
@@ -212,42 +234,69 @@ export class IrohWebWorker implements Worker {
                       try {
                         if (!bi.send.closed) {
                           await bi.send.writeAll(new TextEncoder().encode(errorResp));
-                          console.log(`[IrohProtocol] Error response forwarded through Iroh`);
+                          console.log(`[IrohProtocol] Error response forwarded through Iroh (connection ID: ${connectionId})`);
+                          
+                          // Close the stream after sending the error
+                          await bi.send.finish();
                         }
                       } catch (error) {
-                        console.error(`[IrohProtocol] Failed to forward error response:`, error);
+                        console.error(`[IrohProtocol] Failed to forward error response (connection ID: ${connectionId}):`, error);
+                      } finally {
+                        // Clean up the listener since we're done with this connection
+                        this._worker?.removeEventListener("message", messageListener);
+                        const index = this._workerNodeMessageListeners.indexOf(messageListener);
+                        if (index > -1) {
+                          this._workerNodeMessageListeners.splice(index, 1);
+                        }
                       }
                     })();
                     
                     return;
                   }
                   
-                  //console.log(`[IrohProtocol] Worker responded: size=${respSize} bytes, preview=${respText.substring(0, 50)}${respText.length > 50 ? '...' : ''}`);
+                  if (isDebugMode()) {
+                    console.log(`[IrohProtocol] Worker responded: size=${respSize} bytes (connection ID: ${connectionId})`);
+                  }
                   
                   // Forward the response asynchronously
                   (async () => {
                     try {
                       if (!bi.send.closed) {
                         await bi.send.writeAll(respBytes);
-                        //console.log(`[IrohProtocol] Response forwarded through Iroh: size=${respSize} bytes`);
+                        
+                        if (isDebugMode()) {
+                          console.log(`[IrohProtocol] Response forwarded through Iroh (connection ID: ${connectionId})`);
+                        }
+                        
+                        // Close the stream after sending the response
+                        await bi.send.finish();
+                        
+                        if (isDebugMode()) {
+                          console.log(`[IrohProtocol] Stream closed after response (connection ID: ${connectionId})`);
+                        }
                       } else {
-                        console.warn(`[IrohProtocol] Cannot forward response: stream already closed`);
+                        console.warn(`[IrohProtocol] Cannot forward response: stream already closed (connection ID: ${connectionId})`);
                       }
                     } catch (error) {
-                      console.error(`[IrohProtocol] Failed to forward response: size=${respSize} bytes, error:`, error);
-                      
-                      // Clean up the listener since we failed to send the response
+                      console.error(`[IrohProtocol] Failed to forward response: size=${respSize} bytes, error (connection ID: ${connectionId}):`, error);
+                    } finally {
+                      // Clean up the listener since we're done with this connection
                       this._worker?.removeEventListener("message", messageListener);
                       const index = this._workerNodeMessageListeners.indexOf(messageListener);
                       if (index > -1) {
                         this._workerNodeMessageListeners.splice(index, 1);
                       }
-                      
-                      throw new Error("Failed to forward response through Iroh stream");
                     }
                   })();
+                  
+                  // Only listen for one response per connection
+                  this._worker?.removeEventListener("message", messageListener);
+                  const index = this._workerNodeMessageListeners.indexOf(messageListener);
+                  if (index > -1) {
+                    this._workerNodeMessageListeners.splice(index, 1);
+                  }
                 } catch (error) {
-                  console.error(`[IrohProtocol] Error handling worker response:`, error);
+                  console.error(`[IrohProtocol] Error handling worker response (connection ID: ${connectionId}):`, error);
                 }
               };
               
@@ -387,22 +436,35 @@ export class IrohWebWorker implements Worker {
     const mainNode = IrohMain.node;
     const WORKER_BRIDGE = Buffer.from("worker-bridge");
     
+    // Generate a unique message ID for tracking
+    const messageId = `msg_${Date.now()}_${this._messageCounter++}`;
+    
     try {
       let conn;
       if (this._remoteNodeId) {
         // Remote mode: Connect via node ID
-        //console.log(`[IrohNetwork] Connecting to remote node ID: ${this._remoteNodeId} (attempt ${retryCount + 1}/${maxRetries + 1})`);
+        if (isDebugMode()) {
+          console.log(`[IrohNetwork] Connecting to remote node ID: ${this._remoteNodeId} (message ID: ${messageId})`);
+        }
         conn = await mainNode.node.endpoint().connect({ nodeId: this._remoteNodeId }, WORKER_BRIDGE);
-        //console.log(`[IrohNetwork] Connected to remote node ID: ${this._remoteNodeId}`);
       } else {
         // Local mode: Connect directly to our worker node
         const workerAddr = await this._workerNode.net.nodeAddr();
-        //console.log(`[IrohNetwork] Connecting to local worker node: ${workerAddr.nodeId} (attempt ${retryCount + 1}/${maxRetries + 1})`);
+        if (isDebugMode()) {
+          console.log(`[IrohNetwork] Connecting to local worker node: ${workerAddr.nodeId} (message ID: ${messageId})`);
+        }
         conn = await mainNode.node.endpoint().connect(workerAddr, WORKER_BRIDGE);
-        //console.log(`[IrohNetwork] Connected to local worker node: ${workerAddr.nodeId}`);
       }
+      
+      // Create a new bidirectional stream for each message
       const bi = await conn.openBi();
-      //console.log(`[IrohNetwork] Opened bidirectional stream`);
+      
+      // Store the stream in the pool for potential cleanup
+      this._streamPool.set(messageId, bi);
+      
+      if (isDebugMode()) {
+        console.log(`[IrohNetwork] Opened bidirectional stream (message ID: ${messageId})`);
+      }
 
       // Write the message
       // Serialize the message with proper BigInt handling
@@ -412,23 +474,47 @@ export class IrohWebWorker implements Worker {
       // Check if message is too large (65KB is the limit based on the error)
       const MAX_MESSAGE_SIZE = 65000; // Setting slightly below the 65536 limit
       if (textBytes.length > MAX_MESSAGE_SIZE) {
-        throw new Error(`Message too large (${textBytes.length} bytes). Maximum size is ${MAX_MESSAGE_SIZE} bytes.`);
+        const errorMsg = `Message too large (${textBytes.length} bytes). Maximum size is ${MAX_MESSAGE_SIZE} bytes.`;
+        console.error(`[IrohNetwork] FATAL: ${errorMsg} (message ID: ${messageId})`);
+        
+        // In debug mode, terminate the process to make the error more visible
+        terminateInDebugMode(`Oversized message: ${textBytes.length} bytes`);
+        
+        throw new Error(errorMsg);
       }
       
-      //console.log(`[IrohNetwork] Sending message: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
+      // Log message size in debug mode
+      if (isDebugMode()) {
+        console.log(`[IrohNetwork] Sending message: size=${textBytes.length} bytes (message ID: ${messageId})`);
+      }
+      
       await bi.send.writeAll(textBytes);
+      
+      // Finish the send stream to indicate we're done sending
       await bi.send.finish();
-      //console.log(`[IrohNetwork] Message sent successfully`);
+      
+      if (isDebugMode()) {
+        console.log(`[IrohNetwork] Message sent successfully (message ID: ${messageId})`);
+      }
 
-      // Don't wait for a response - just set up a listener for any future responses
-      // This makes it behave more like a regular WebWorker
-      this._listenForResponses(bi);
+      // Set up a listener for the response with a timeout
+      this._listenForResponses(bi, messageId);
+      
+      // Set a timeout to clean up the stream
+      setTimeout(() => {
+        this._cleanupStream(messageId);
+      }, 10000); // 10 second timeout
     } catch (e) {
-      console.error(`[IrohNetwork] Failed to process message (attempt ${retryCount + 1}/${maxRetries + 1}):`, e);
+      console.error(`[IrohNetwork] Failed to process message (attempt ${retryCount + 1}/${maxRetries + 1}, message ID: ${messageId}):`, e);
+      
+      // Clean up the stream on error
+      this._cleanupStream(messageId);
       
       // Retry logic
       if (retryCount < maxRetries) {
-        //console.log(`[IrohNetwork] Retrying in ${delayMs}ms... (${retryCount + 1}/${maxRetries})`);
+        if (isDebugMode()) {
+          console.log(`[IrohNetwork] Retrying in ${delayMs}ms... (${retryCount + 1}/${maxRetries}, message ID: ${messageId})`);
+        }
         
         // Wait before retrying
         await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -441,7 +527,7 @@ export class IrohWebWorker implements Worker {
       }
       
       // If we've exhausted all retries, propagate the error
-      console.error(`[IrohNetwork] All ${maxRetries + 1} attempts failed, giving up`);
+      console.error(`[IrohNetwork] All ${maxRetries + 1} attempts failed, giving up (message ID: ${messageId})`);
       const errorEvent = new ErrorEvent('error', { error: e });
       this._dispatchToListeners('error', errorEvent);
       throw e;
@@ -449,37 +535,37 @@ export class IrohWebWorker implements Worker {
   }
 
   /**
-   * Helper method to serialize objects containing BigInt values
-   * Converts BigInt to string representation with a special marker
+   * Clean up a stream from the pool
    */
-  private _serializeWithBigInt(value: unknown): string {
-    return JSON.stringify(value, (_, v) => {
-      // If the value is a BigInt, convert it to a specially marked string
-      if (typeof v === 'bigint') {
-        return { __bigint__: v.toString() };
+  private _cleanupStream(messageId: string): void {
+    const bi = this._streamPool.get(messageId);
+    if (bi) {
+      if (isDebugMode()) {
+        console.log(`[IrohNetwork] Cleaning up stream (message ID: ${messageId})`);
       }
-      return v;
-    });
-  }
-
-  /**
-   * Helper method to deserialize objects with BigInt values
-   */
-  private _deserializeWithBigInt(text: string): any {
-    return JSON.parse(text, (_, v) => {
-      // Check for our special BigInt marker
-      if (v && typeof v === 'object' && '__bigint__' in v) {
-        return BigInt(v.__bigint__);
+      
+      try {
+        // Close both send and receive streams if they're not already closed
+        if (!bi.send.closed) {
+          bi.send.finish().catch(() => {});
+        }
+        if (!bi.recv.closed) {
+          bi.recv.stopped().catch(() => {});
+        }
+      } catch (error) {
+        // Ignore errors during cleanup
+      } finally {
+        // Remove from pool
+        this._streamPool.delete(messageId);
       }
-      return v;
-    });
+    }
   }
 
   /**
    * Set up a listener for responses on a bidirectional stream
    * This is done asynchronously to not block the message sending
    */
-  private _listenForResponses(bi: any): void {
+  private _listenForResponses(bi: any, messageId: string): void {
     // Start a separate async task to listen for responses
     (async () => {
       try {
@@ -488,45 +574,82 @@ export class IrohWebWorker implements Worker {
         // Set a maximum size for response reading to prevent "stream too long" errors
         const MAX_RESPONSE_SIZE = 65000; // Setting slightly below the 65536 limit
         
+        if (isDebugMode()) {
+          console.log(`[IrohNetwork] Waiting for response (message ID: ${messageId})`);
+        }
+        
         try {
           const responseBytes = await bi.recv.readToEnd(MAX_RESPONSE_SIZE);
+          
           if (responseBytes && responseBytes.length > 0 && !this._terminated) {
+            if (isDebugMode()) {
+              console.log(`[IrohNetwork] Received response: size=${responseBytes.length} bytes (message ID: ${messageId})`);
+            }
+            
             const responseText = new TextDecoder().decode(responseBytes);
-            //console.log(`[IrohNetwork] Received response: ${responseText.substring(0, 100)}${responseText.length > 100 ? '...' : ''}`);
             
             try {
               // Parse the response using our BigInt-aware deserializer
               const responseObj = this._deserializeWithBigInt(responseText);
+              
+              // Check if this looks like multiple messages joined together
+              if (typeof responseText === 'string' && responseText.includes('}{')) {
+                console.warn(`[IrohNetwork] WARNING: Response may contain multiple joined messages (message ID: ${messageId})`);
+                console.warn(`[IrohNetwork] Response preview: ${responseText.substring(0, 100)}...`);
+              }
+              
               const messageEvent = new MessageEvent('message', { data: responseObj });
               this._dispatchToListeners('message', messageEvent);
-              //console.log(`[IrohNetwork] Response dispatched to listeners`);
             } catch (parseError) {
-              console.error(`[IrohNetwork] Failed to parse response:`, parseError);
+              console.error(`[IrohNetwork] Failed to parse response (message ID: ${messageId}):`, parseError);
+              
+              // Check if this looks like multiple messages joined together
+              if (typeof responseText === 'string' && responseText.includes('}{')) {
+                console.error(`[IrohNetwork] ERROR: Response appears to contain multiple joined JSON objects`);
+                console.error(`[IrohNetwork] Response preview: ${responseText.substring(0, 100)}...`);
+                
+                // Try to split and process the messages individually in debug mode
+                if (isDebugMode()) {
+                  console.log(`[IrohNetwork] Attempting to split joined messages...`);
+                  try {
+                    // This is a simple approach - for production you'd want something more robust
+                    const fixedText = '[' + responseText.replace(/}{/g, '},{') + ']';
+                    const parts = JSON.parse(fixedText);
+                    console.log(`[IrohNetwork] Successfully split into ${parts.length} parts`);
+                  } catch (e) {
+                    console.error(`[IrohNetwork] Failed to split messages:`, e);
+                  }
+                }
+              }
+            }
+          } else {
+            if (isDebugMode()) {
+              console.log(`[IrohNetwork] No response data received (message ID: ${messageId})`);
             }
           }
         } catch (streamError: any) {
           if (streamError?.message?.includes('stream too long')) {
-            console.error(`[IrohNetwork] Response exceeded maximum size limit of ${MAX_RESPONSE_SIZE} bytes`);
+            const errorMsg = `Response exceeded maximum size limit of ${MAX_RESPONSE_SIZE} bytes`;
+            console.error(`[IrohNetwork] FATAL: ${errorMsg} (message ID: ${messageId})`);
+            
+            // In debug mode, terminate the process to make the error more visible
+            terminateInDebugMode(`Oversized stream response for message ID: ${messageId}`);
+            
             const errorEvent = new ErrorEvent('error', { 
               error: new Error(`Response too large. Maximum size is ${MAX_RESPONSE_SIZE} bytes.`) 
             });
             this._dispatchToListeners('error', errorEvent);
           } else {
+            console.error(`[IrohNetwork] Stream error (message ID: ${messageId}):`, streamError);
             throw streamError; // Re-throw other stream errors
           }
         }
       } catch (error) {
-        console.error(`[IrohNetwork] Error while listening for responses:`, error);
+        console.error(`[IrohNetwork] Error while listening for responses (message ID: ${messageId}):`, error);
         // Don't propagate this error since it's in a background task
       } finally {
-        // Make sure to properly close the stream
-        try {
-          if (!bi.recv.closed) {
-            await bi.recv.stopped();
-          }
-        } catch (closeError) {
-          // Silently handle stream closing errors
-        }
+        // Clean up the stream after processing the response
+        this._cleanupStream(messageId);
       }
     })();
   }
@@ -600,6 +723,12 @@ export class IrohWebWorker implements Worker {
 
   terminate(): void {
     this._terminated = true;
+    
+    // Clean up all streams in the pool
+    for (const messageId of this._streamPool.keys()) {
+      this._cleanupStream(messageId);
+    }
+    
     if (this._workerNode) {
       this._workerNode = null;
     }
@@ -611,6 +740,33 @@ export class IrohWebWorker implements Worker {
       this._worker?.removeEventListener("message", listener);
     }
     this._workerNodeMessageListeners = [];
+  }
+
+  /**
+   * Helper method to serialize objects containing BigInt values
+   * Converts BigInt to string representation with a special marker
+   */
+  private _serializeWithBigInt(value: unknown): string {
+    return JSON.stringify(value, (_, v) => {
+      // If the value is a BigInt, convert it to a specially marked string
+      if (typeof v === 'bigint') {
+        return { __bigint__: v.toString() };
+      }
+      return v;
+    });
+  }
+
+  /**
+   * Helper method to deserialize objects with BigInt values
+   */
+  private _deserializeWithBigInt(text: string): any {
+    return JSON.parse(text, (_, v) => {
+      // Check for our special BigInt marker
+      if (v && typeof v === 'object' && '__bigint__' in v) {
+        return BigInt(v.__bigint__);
+      }
+      return v;
+    });
   }
 }
 
@@ -653,4 +809,50 @@ interface IrohMemoryOptions {
       accept(err: unknown, connecting: unknown): Promise<void>;
     };
   };
+}
+
+/**
+ * Add a helper method to check if we're in development mode
+ * This can be called at the start of the file to set up debugging
+ */
+export function setupIrohDebugMode(enabled = true): void {
+  if (enabled) {
+    // Use Deno namespace if available
+    if (typeof Deno !== 'undefined') {
+      // Set an environment variable in Deno
+      Deno.env.set("IROH_DEBUG", "true");
+      console.log('[IrohWorker] Debug mode enabled for Deno - process will terminate on message size violations');
+    } else if (typeof process !== 'undefined') {
+      // Fallback for Node.js
+      process.env.NODE_ENV = 'development';
+      console.log('[IrohWorker] Debug mode enabled for Node.js - process will terminate on message size violations');
+    }
+  }
+}
+
+/**
+ * Check if we're in debug mode
+ */
+function isDebugMode(): boolean {
+  if (typeof Deno !== 'undefined') {
+    return Deno.env.get("IROH_DEBUG") === "true";
+  } else if (typeof process !== 'undefined') {
+    return process.env.NODE_ENV === 'development';
+  }
+  return false;
+}
+
+/**
+ * Helper to terminate process in debug mode
+ */
+function terminateInDebugMode(message: string): void {
+  if (isDebugMode()) {
+    console.error(`[IrohWorker] TERMINATING: ${message}`);
+    
+    if (typeof Deno !== 'undefined') {
+      Deno.exit(1);
+    } else if (typeof process !== 'undefined') {
+      process.exit(1);
+    }
+  }
 }
