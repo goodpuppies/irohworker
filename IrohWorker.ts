@@ -334,7 +334,7 @@ export class IrohWebWorker implements Worker {
 
     const mainNode = IrohMain.node;
     const WORKER_BRIDGE = Buffer.from("worker-bridge");
-    
+
     try {
       let conn;
       if (this._remoteNodeId) {
@@ -353,7 +353,8 @@ export class IrohWebWorker implements Worker {
       console.log(`[IrohNetwork] Opened bidirectional stream`);
 
       // Write the message
-      const text = JSON.stringify(msg);
+      // Serialize the message with proper BigInt handling
+      const text = this._serializeWithBigInt(msg);
       console.log(`[IrohNetwork] Sending message: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
       await bi.send.writeAll(new TextEncoder().encode(text));
       await bi.send.finish();
@@ -364,27 +365,54 @@ export class IrohWebWorker implements Worker {
       this._listenForResponses(bi);
     } catch (e) {
       console.error(`[IrohNetwork] Failed to process message (attempt ${retryCount + 1}/${maxRetries + 1}):`, e);
-      
+
       // Retry logic
       if (retryCount < maxRetries) {
         console.log(`[IrohNetwork] Retrying in ${delayMs}ms... (${retryCount + 1}/${maxRetries})`);
-        
+
         // Wait before retrying
         await new Promise(resolve => setTimeout(resolve, delayMs));
-        
+
         // Exponential backoff for delay
         const nextDelayMs = delayMs * 2;
-        
+
         // Retry with incremented counter
         return this._postMessageViaIroh(msg, retryCount + 1, maxRetries, nextDelayMs);
       }
-      
+
       // If we've exhausted all retries, propagate the error
       console.error(`[IrohNetwork] All ${maxRetries + 1} attempts failed, giving up`);
       const errorEvent = new ErrorEvent('error', { error: e });
       this._dispatchToListeners('error', errorEvent);
       throw e;
     }
+  }
+
+  /**
+   * Helper method to serialize objects containing BigInt values
+   * Converts BigInt to string representation with a special marker
+   */
+  private _serializeWithBigInt(value: unknown): string {
+    return JSON.stringify(value, (_, v) => {
+      // If the value is a BigInt, convert it to a specially marked string
+      if (typeof v === 'bigint') {
+        return { __bigint__: v.toString() };
+      }
+      return v;
+    });
+  }
+
+  /**
+   * Helper method to deserialize objects with BigInt values
+   */
+  private _deserializeWithBigInt(text: string): any {
+    return JSON.parse(text, (_, v) => {
+      // Check for our special BigInt marker
+      if (v && typeof v === 'object' && '__bigint__' in v) {
+        return BigInt(v.__bigint__);
+      }
+      return v;
+    });
   }
 
   /**
@@ -396,14 +424,15 @@ export class IrohWebWorker implements Worker {
     (async () => {
       try {
         if (this._terminated) return;
-        
+
         const responseBytes = await bi.recv.readToEnd(65536);
         if (responseBytes && responseBytes.length > 0 && !this._terminated) {
           const responseText = new TextDecoder().decode(responseBytes);
           console.log(`[IrohNetwork] Received response: ${responseText.substring(0, 100)}${responseText.length > 100 ? '...' : ''}`);
-          
+
           try {
-            const responseObj = JSON.parse(responseText);
+            // Parse the response using our BigInt-aware deserializer
+            const responseObj = this._deserializeWithBigInt(responseText);
             const messageEvent = new MessageEvent('message', { data: responseObj });
             this._dispatchToListeners('message', messageEvent);
             console.log(`[IrohNetwork] Response dispatched to listeners`);
