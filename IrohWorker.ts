@@ -64,7 +64,7 @@ export class IrohWebWorker implements Worker {
   // Worker interface properties
   onmessage: ((this: Worker, e: MessageEvent) => any) = () => {};
   onmessageerror: ((this: Worker, e: MessageEvent) => any) = () => {};
-  onerror: ((this: Worker, e: ErrorEvent) => any) = () => {};
+  onerror: ((this: AbstractWorker, e: ErrorEvent) => any) = () => {};
 
   constructor(urlOrNodeAddr: string | URL | { nodeId: string } | { node: IrohNode }, options?: WorkerOptions) {
     if (typeof urlOrNodeAddr === 'object' && 'node' in urlOrNodeAddr) {
@@ -77,7 +77,6 @@ export class IrohWebWorker implements Worker {
     } else {
       // Local worker mode
       this._worker = new Worker(urlOrNodeAddr, options);
-      this._worker.onmessage = () => {}; // Prevent original worker events
     }
     this._initPromise = this._initializeWorkerNode();
   }
@@ -95,8 +94,13 @@ export class IrohWebWorker implements Worker {
       } else if (this._worker) {
         // Local worker mode - only create Iroh node if needed for sharing
         console.log("[Init] Initializing for local worker mode");
-        // We don't need to create an Iroh node immediately for local workers
-        // It will be created on-demand when getNode() or getIrohAddr() is called
+        // Set up message handler for local worker
+        this._worker.onmessage = (event: MessageEvent) => {
+          console.log("[LocalWorker] Received message from worker:");
+          // Dispatch the message to all listeners
+          const messageEvent = new MessageEvent('message', { data: event.data });
+          this._dispatchToListeners('message', messageEvent);
+        };
       }
       
       this._initialized = true;
@@ -301,17 +305,7 @@ export class IrohWebWorker implements Worker {
       // Use direct Worker API for local workers, Iroh network only for remote workers
       if (this._worker && !this._remoteNodeId) {
         // Local worker mode - use direct Worker API
-        console.log("[LocalWorker] Using direct Worker API for local worker");
-        
-        // Create a promise that will resolve when the worker responds
-        const responsePromise = new Promise<unknown>((resolve) => {
-          const listener = (evt: MessageEvent) => {
-            console.log("[LocalWorker] Received direct response from worker");
-            resolve(evt.data);
-            this._worker?.removeEventListener("message", listener);
-          };
-          this._worker?.addEventListener("message", listener, { once: true });
-        });
+        //console.log("[LocalWorker] Using direct Worker API for local worker");
         
         // Send the message directly to the worker
         if (Array.isArray(transferOrOptions)) {
@@ -323,17 +317,9 @@ export class IrohWebWorker implements Worker {
         }
         console.log("[LocalWorker] Message sent directly to worker");
         
-        // Wait for the response with a timeout
-        const responseObj = await Promise.race([
-          responsePromise,
-          new Promise<never>((_, reject) => 
-            setTimeout(() => reject(new Error("Direct response timeout")), 1000)
-          )
-        ]);
-        
-        // Dispatch the response to listeners
-        const messageEvent = new MessageEvent('message', { data: responseObj });
-        this._dispatchToListeners('message', messageEvent);
+        // In local mode, we don't need to wait for a response here
+        // The worker's responses will be handled by the event listeners
+        // that were set up during initialization
       } else {
         // Remote worker mode or proxy mode - use Iroh network
         console.log("[RemoteWorker] Using Iroh network for remote/proxy worker");
