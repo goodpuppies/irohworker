@@ -384,6 +384,11 @@ export class IrohWebWorker implements Worker {
   }
 
   async getIrohAddr(): Promise<{ nodeId: string }> {
+    // If we're in remote mode, we already have the node ID, so return it directly
+    if (this._remoteNodeId) {
+      return { nodeId: this._remoteNodeId };
+    }
+    
     const node = await this.getNode();
     return node.net.nodeAddr();
   }
