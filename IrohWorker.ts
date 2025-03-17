@@ -25,7 +25,7 @@ export class IrohMain {
     // Start initialization
     IrohMain._initPromise = (async () => {
       try {
-        //////console.log("IrohMain: Starting initialization of main node");
+        if (isDebugMode()) { console.log("IrohMain: Starting initialization of main node"); }
         const WORKER_BRIDGE = Buffer.from("worker-bridge");
         const protocols = {
           [WORKER_BRIDGE.toString("utf8")]: (_err: unknown, _ep: unknown, _client: any) => ({
@@ -35,7 +35,7 @@ export class IrohMain {
                 return;
               }
               const conn = await connecting.connect();
-              //////console.log("MainNode: accepted inbound connection from a worker");
+              console.log("MainNode: accepted inbound connection from a worker");
               // We'll read the message in a readToEnd manner if we want
               // (The example below is symmetrical, so let's keep it minimal.)
             },
@@ -45,7 +45,7 @@ export class IrohMain {
         IrohMain._mainNode = await Iroh.memory({ protocols });
         IrohMain._initialized = true;
         const addr = await IrohMain._mainNode.net.nodeAddr();
-        //////console.log("IrohMain: Main node created. Node ID:", addr.nodeId);
+        if (isDebugMode()) { console.log("IrohMain: Main node created. Node ID:", addr.nodeId); }
         return IrohMain._mainNode;
       } catch (error) {
         console.error("IrohMain: Error initializing main node:", error);
@@ -111,15 +111,19 @@ export class IrohWebWorker implements Worker {
       // Only initialize Iroh for remote workers or when explicitly requested
       if (this._remoteNodeId) {
         // Remote worker mode - need Iroh
-        //////console.log("[Init] Initializing for remote worker mode");
+        if (isDebugMode()){
+          console.log("[Init] Initializing for remote worker mode");
+        }
         await IrohMain.init(); // ensure main node exists
         this._workerNode = await this._createWorkerNode();
       } else if (this._worker) {
         // Local worker mode - only create Iroh node if needed for sharing
-        ////////console.log("[Init] Initializing for local worker mode");
+        if (isDebugMode()) { console.log("[Init] Initializing for local worker mode"); }
         // Set up message handler for local worker
         this._worker.onmessage = (event: MessageEvent) => {
-          ////////console.log("[LocalWorker] Received message from worker:");
+          if (isDebugMode()) {
+            console.log("[LocalWorker] Received message from worker:");
+          }
           // Dispatch the message to all listeners
           const messageEvent = new MessageEvent('message', { data: event.data });
           this._dispatchToListeners('message', messageEvent);
@@ -163,10 +167,10 @@ export class IrohWebWorker implements Worker {
 
           // Only handle inbound connections if we're a local worker
           if (!this._remoteNodeId) {
-            //////console.log("[IrohProtocol] Accepting inbound connection");
+            if(isDebugMode()){console.log("[IrohProtocol] Accepting inbound connection");}
             // Each connection = 1 message from main -> worker
             const conn = await connecting.connect();
-            //////console.log("[IrohProtocol] Connected");
+            if (isDebugMode()) { console.log("[IrohProtocol] Connected"); }
             const bi = await conn.acceptBi();
             
             // Generate a unique connection ID for tracking
@@ -308,7 +312,7 @@ export class IrohWebWorker implements Worker {
               
               // Post the message to the worker script without waiting for a response
               this._worker?.postMessage(requestObj);
-              //console.log("[IrohProtocol] Message posted to Worker");
+              if (isDebugMode()) { console.log("[IrohProtocol] Message posted to Worker"); }
             } catch (e) {
               console.error("WorkerNode: Error processing message:", e);
               throw e;
@@ -333,7 +337,9 @@ export class IrohWebWorker implements Worker {
     if (this._remoteNodeId) {
       // For remote node ID, we don't need to create a new node, 
       // we just need to create a proxy object that has the remote node ID
-      //////console.log(`IrohWebWorker: Using remote node ID: ${this._remoteNodeId}`);
+      if (isDebugMode()) {
+        console.log(`IrohWebWorker: Using remote node ID: ${this._remoteNodeId}`);
+      }
       
       // Create a minimal proxy object that has the required node ID
       iroh = {
@@ -353,7 +359,7 @@ export class IrohWebWorker implements Worker {
         protocols,
       }) as unknown as IrohNode;
       const addr = await iroh.net.nodeAddr();
-      //////console.log(`IrohWebWorker: Local node created. Node ID: ${addr.nodeId}`);
+      if (isDebugMode()) { console.log(`IrohWebWorker: Local node created. Node ID: ${addr.nodeId}`); }
     }
 
     return iroh;
@@ -363,13 +369,13 @@ export class IrohWebWorker implements Worker {
     if (!this._workerNode) {
       // Create the Iroh node on-demand for local workers
       if (this._worker && !this._remoteNodeId) {
-        //////console.log("[GetNode] Creating Iroh node on-demand for local worker");
+        if (isDebugMode()) { console.log("[GetNode] Creating Iroh node on-demand for local worker"); }
         await IrohMain.init(); // ensure main node exists
         this._workerNode = await this._createWorkerNode();
         
         // Log the node ID for debugging
         const workerAddr = await this._workerNode.net.nodeAddr();
-        ////////console.log("[GetNode] Worker node created with ID:", workerAddr.nodeId);
+        if (isDebugMode()) { console.log("[GetNode] Worker node created with ID:", workerAddr.nodeId); }
       } else {
         throw new Error("Worker node not initialized");
       }
@@ -402,8 +408,10 @@ export class IrohWebWorker implements Worker {
     try {
       // Use direct Worker API for local workers, Iroh network only for remote workers
       if (this._worker && !this._remoteNodeId) {
-        // Local worker mode - use direct Worker API
-        ////////console.log("[LocalWorker] Using direct Worker API for local worker");
+        // Local worker mode - use direct Worker API'
+        if (isDebugMode()) {
+          console.log("[LocalWorker] Using direct Worker API for local worker");
+        }
         
         // Send the message directly to the worker
         if (Array.isArray(transferOrOptions)) {
@@ -413,14 +421,16 @@ export class IrohWebWorker implements Worker {
         } else {
           this._worker.postMessage(message);
         }
-        ////////console.log("[LocalWorker] Message sent directly to worker");
+        if (isDebugMode()) {
+          console.log("[LocalWorker] Message sent directly to worker");
+        }
         
         // In local mode, we don't need to wait for a response here
         // The worker's responses will be handled by the event listeners
         // that were set up during initialization
       } else {
         // Remote worker mode or proxy mode - use Iroh network
-        //////console.log("[RemoteWorker] Using Iroh network for remote/proxy worker");
+        if (isDebugMode()){console.log("[RemoteWorker] Using Iroh network for remote/proxy worker");}
         await this._postMessageViaIroh(message);
       }
     } catch (error) {
@@ -505,8 +515,9 @@ export class IrohWebWorker implements Worker {
         this._cleanupStream(messageId);
       }, 10000); // 10 second timeout
     } catch (e) {
-      console.error(`[IrohNetwork] Failed to process message (attempt ${retryCount + 1}/${maxRetries + 1}, message ID: ${messageId}):`, e);
-      
+      if (isDebugMode()) {
+        console.error(`[IrohNetwork] Failed to process message (attempt ${retryCount + 1}/${maxRetries + 1}, message ID: ${messageId}):`, e);
+      }
       // Clean up the stream on error
       this._cleanupStream(messageId);
       
