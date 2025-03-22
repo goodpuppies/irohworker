@@ -19,6 +19,9 @@ export class IrohWebWorker implements Worker {
   private _messageCounter: number = 0;
   private _streamPool: Map<string, any> = new Map();
 
+  // Maximum message size in bytes (150MB)
+  private static readonly MAX_MESSAGE_SIZE = 150 * 1024 * 1024;
+
   // Worker interface properties
   onmessage: ((this: Worker, e: MessageEvent) => any) = () => {};
   onmessageerror: ((this: Worker, e: MessageEvent) => any) = () => {};
@@ -121,8 +124,7 @@ export class IrohWebWorker implements Worker {
                 console.log(`[IrohProtocol] Reading request from main (connection ID: ${connectionId})`);
               }
               
-              const MAX_REQUEST_SIZE = 10 * 1024 * 1024; // 10MB buffer size
-              const requestBytes = await bi.recv.readToEnd(MAX_REQUEST_SIZE);
+              const requestBytes = await bi.recv.readToEnd(IrohWebWorker.MAX_MESSAGE_SIZE);
               let requestObj: unknown;
               
               if (requestBytes && requestBytes.length > 0) {
@@ -155,9 +157,8 @@ export class IrohWebWorker implements Worker {
                   const respSize = respBytes.length;
                   
                   // Check if response is too large
-                  const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB buffer size
-                  if (respSize > MAX_RESPONSE_SIZE) {
-                    const errorMsg = `Response too large (${respSize} bytes). Maximum size is ${MAX_RESPONSE_SIZE} bytes.`;
+                  if (respSize > IrohWebWorker.MAX_MESSAGE_SIZE) {
+                    const errorMsg = `Response too large (${respSize} bytes). Maximum size is ${IrohWebWorker.MAX_MESSAGE_SIZE} bytes.`;
                     console.error(`[IrohProtocol] FATAL: ${errorMsg} (connection ID: ${connectionId})`);
                     
                     // In debug mode, terminate the process to make the error more visible
@@ -421,10 +422,9 @@ export class IrohWebWorker implements Worker {
       const text = this._serializeWithBigInt(msg);
       const textBytes = new TextEncoder().encode(text);
       
-      // Check if message is too large (10MB is the limit)
-      const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB buffer size
-      if (textBytes.length > MAX_MESSAGE_SIZE) {
-        const errorMsg = `Message too large (${textBytes.length} bytes). Maximum size is ${MAX_MESSAGE_SIZE} bytes.`;
+      // Check if message is too large 
+      if (textBytes.length > IrohWebWorker.MAX_MESSAGE_SIZE) {
+        const errorMsg = `Message too large (${textBytes.length} bytes). Maximum size is ${IrohWebWorker.MAX_MESSAGE_SIZE} bytes.`;
         console.error(`[IrohNetwork] FATAL: ${errorMsg} (message ID: ${messageId})`);
         
         // In debug mode, terminate the process to make the error more visible
@@ -453,7 +453,7 @@ export class IrohWebWorker implements Worker {
       // Set a timeout to clean up the stream
       setTimeout(() => {
         this._cleanupStream(messageId);
-      }, 10000); // 10 second timeout
+      }, 60000); // 60 second timeout
     } catch (e) {
       if (isDebugMode()) {
         console.error(`[IrohNetwork] Failed to process message (attempt ${retryCount + 1}/${maxRetries + 1}, message ID: ${messageId}):`, e);
@@ -523,29 +523,20 @@ export class IrohWebWorker implements Worker {
         if (this._terminated) return;
         
         // Set a maximum size for response reading
-        const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB buffer size
         
         if (isDebugMode()) {
           console.log(`[IrohNetwork] Waiting for response (message ID: ${messageId})`);
         }
         
         try {
-          // Create a pre-allocated buffer for reading
-          const readBuffer = new Uint8Array(MAX_RESPONSE_SIZE);
+          // Read data using readToEnd instead of fixed-size buffer read
+          const responseBytes = await bi.recv.readToEnd(IrohWebWorker.MAX_MESSAGE_SIZE);
           
-          // Read data into the buffer
-          const bytesRead = await bi.recv.read(readBuffer);
-          
-          if (bytesRead && bytesRead > 0n && !this._terminated) {
-            // Convert BigInt to Number for buffer slicing
-            const bytesReadNum = Number(bytesRead);
-            
+          if (responseBytes && responseBytes.length > 0 && !this._terminated) {
             if (isDebugMode()) {
-              console.log(`[IrohNetwork] Received response: size=${bytesReadNum} bytes (message ID: ${messageId})`);
+              console.log(`[IrohNetwork] Received response: size=${responseBytes.length} bytes (message ID: ${messageId})`);
             }
             
-            // Only use the portion of the buffer that was filled with data
-            const responseBytes = readBuffer.slice(0, bytesReadNum);
             const responseText = new TextDecoder().decode(responseBytes);
             
             try {
@@ -569,14 +560,14 @@ export class IrohWebWorker implements Worker {
           }
         } catch (streamError: any) {
           if (streamError?.message?.includes('stream too long')) {
-            const errorMsg = `Response exceeded maximum size limit of ${MAX_RESPONSE_SIZE} bytes`;
+            const errorMsg = `Response exceeded maximum size limit of ${IrohWebWorker.MAX_MESSAGE_SIZE} bytes. Consider increasing IrohWebWorker.MAX_MESSAGE_SIZE or implementing message chunking`;
             console.error(`[IrohNetwork] FATAL: ${errorMsg} (message ID: ${messageId})`);
             
             // In debug mode, terminate the process to make the error more visible
-            terminateInDebugMode(`Oversized stream response for message ID: ${messageId}`);
+            terminateInDebugMode(`Oversized response detected: ${errorMsg}`);
             
             const errorEvent = new ErrorEvent('error', { 
-              error: new Error(`Response too large. Maximum size is ${MAX_RESPONSE_SIZE} bytes.`) 
+              error: new Error(`Response too large. Maximum size is ${IrohWebWorker.MAX_MESSAGE_SIZE} bytes.`) 
             });
             this._dispatchToListeners('error', errorEvent);
           } else {
@@ -785,7 +776,7 @@ interface IrohNode {
 interface IrohMemoryOptions {
   protocols: {
     [key: string]: (err: unknown, ep: unknown, client: unknown) => {
-      accept(err: unknown, connecting: unknown): Promise<void>;
+      accept: (err: unknown, connecting: unknown) => Promise<void>;
     };
   };
 }
