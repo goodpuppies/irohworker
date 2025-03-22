@@ -552,34 +552,14 @@ export class IrohWebWorker implements Worker {
               // Parse the response using our BigInt-aware deserializer
               const responseObj = this._deserializeWithBigInt(responseText);
               
-              // Check if this looks like multiple messages joined together
-              if (typeof responseText === 'string' && responseText.includes('}{')) {
-                console.warn(`[IrohNetwork] WARNING: Response may contain multiple joined messages (message ID: ${messageId})`);
-                console.warn(`[IrohNetwork] Response preview: ${responseText.substring(0, 100)}...`);
-              }
-              
               const messageEvent = new MessageEvent('message', { data: responseObj });
               this._dispatchToListeners('message', messageEvent);
             } catch (parseError) {
               console.error(`[IrohNetwork] Failed to parse response (message ID: ${messageId}):`, parseError);
               
-              // Check if this looks like multiple messages joined together
-              if (typeof responseText === 'string' && responseText.includes('}{')) {
-                console.error(`[IrohNetwork] ERROR: Response appears to contain multiple joined JSON objects`);
+              // Log response preview to aid debugging
+              if (typeof responseText === 'string') {
                 console.error(`[IrohNetwork] Response preview: ${responseText.substring(0, 100)}...`);
-                
-                // Try to split and process the messages individually in debug mode
-                if (isDebugMode()) {
-                  console.log(`[IrohNetwork] Attempting to split joined messages...`);
-                  try {
-                    // This is a simple approach - for production you'd want something more robust
-                    const fixedText = '[' + responseText.replace(/}{/g, '},{') + ']';
-                    const parts = JSON.parse(fixedText);
-                    console.log(`[IrohNetwork] Successfully split into ${parts.length} parts`);
-                  } catch (e) {
-                    console.error(`[IrohNetwork] Failed to split messages:`, e);
-                  }
-                }
               }
             }
           } else {
