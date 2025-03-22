@@ -2,7 +2,6 @@ import { Iroh } from "npm:@number0/iroh";
 import { Buffer } from "node:buffer";
 import { IrohMain } from "./IrohMain.ts";
 
-
 /**
  * IrohWebWorker:
  * Extends Worker to use Iroh for communication.
@@ -122,7 +121,7 @@ export class IrohWebWorker implements Worker {
                 console.log(`[IrohProtocol] Reading request from main (connection ID: ${connectionId})`);
               }
               
-              const MAX_REQUEST_SIZE = 65000; // Setting slightly below the 65536 limit
+              const MAX_REQUEST_SIZE = 10 * 1024 * 1024; // 10MB buffer size
               const requestBytes = await bi.recv.readToEnd(MAX_REQUEST_SIZE);
               let requestObj: unknown;
               
@@ -156,7 +155,7 @@ export class IrohWebWorker implements Worker {
                   const respSize = respBytes.length;
                   
                   // Check if response is too large
-                  const MAX_RESPONSE_SIZE = 65000; // Setting slightly below the 65536 limit
+                  const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB buffer size
                   if (respSize > MAX_RESPONSE_SIZE) {
                     const errorMsg = `Response too large (${respSize} bytes). Maximum size is ${MAX_RESPONSE_SIZE} bytes.`;
                     console.error(`[IrohProtocol] FATAL: ${errorMsg} (connection ID: ${connectionId})`);
@@ -422,8 +421,8 @@ export class IrohWebWorker implements Worker {
       const text = this._serializeWithBigInt(msg);
       const textBytes = new TextEncoder().encode(text);
       
-      // Check if message is too large (65KB is the limit based on the error)
-      const MAX_MESSAGE_SIZE = 65000; // Setting slightly below the 65536 limit
+      // Check if message is too large (10MB is the limit)
+      const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB buffer size
       if (textBytes.length > MAX_MESSAGE_SIZE) {
         const errorMsg = `Message too large (${textBytes.length} bytes). Maximum size is ${MAX_MESSAGE_SIZE} bytes.`;
         console.error(`[IrohNetwork] FATAL: ${errorMsg} (message ID: ${messageId})`);
@@ -523,21 +522,30 @@ export class IrohWebWorker implements Worker {
       try {
         if (this._terminated) return;
         
-        // Set a maximum size for response reading to prevent "stream too long" errors
-        const MAX_RESPONSE_SIZE = 65000; // Setting slightly below the 65536 limit
+        // Set a maximum size for response reading
+        const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB buffer size
         
         if (isDebugMode()) {
           console.log(`[IrohNetwork] Waiting for response (message ID: ${messageId})`);
         }
         
         try {
-          const responseBytes = await bi.recv.readToEnd(MAX_RESPONSE_SIZE);
+          // Create a pre-allocated buffer for reading
+          const readBuffer = new Uint8Array(MAX_RESPONSE_SIZE);
           
-          if (responseBytes && responseBytes.length > 0 && !this._terminated) {
+          // Read data into the buffer
+          const bytesRead = await bi.recv.read(readBuffer);
+          
+          if (bytesRead && bytesRead > 0n && !this._terminated) {
+            // Convert BigInt to Number for buffer slicing
+            const bytesReadNum = Number(bytesRead);
+            
             if (isDebugMode()) {
-              console.log(`[IrohNetwork] Received response: size=${responseBytes.length} bytes (message ID: ${messageId})`);
+              console.log(`[IrohNetwork] Received response: size=${bytesReadNum} bytes (message ID: ${messageId})`);
             }
             
+            // Only use the portion of the buffer that was filled with data
+            const responseBytes = readBuffer.slice(0, bytesReadNum);
             const responseText = new TextDecoder().decode(responseBytes);
             
             try {
@@ -730,6 +738,44 @@ interface Net {
 }
 
 interface Node {
+  nodeId: string;
+  send: {
+    writeAll(data: Uint8Array): Promise<void>;
+    finish(): Promise<void>;
+    stopped(): Promise<void>;
+  };
+  recv: {
+    readToEnd(size: number): Promise<Uint8Array>;
+    read(buffer: Uint8Array): Promise<bigint>;
+  };
+  writeAll(data: Uint8Array): Promise<void>;
+  finish(): Promise<void>;
+  stopped(): Promise<void>;
+  readToEnd(size: number): Promise<Uint8Array>;
+  openBi(): Promise<{
+    send: {
+      writeAll(data: Uint8Array): Promise<void>;
+      finish(): Promise<void>;
+      stopped(): Promise<void>;
+    };
+    recv: {
+      readToEnd(size: number): Promise<Uint8Array>;
+      read(buffer: Uint8Array): Promise<bigint>;
+    };
+  }>;
+  connect(addr: { nodeId: string }, protocol: Buffer): Promise<{
+    openBi(): Promise<{
+      send: {
+        writeAll(data: Uint8Array): Promise<void>;
+        finish(): Promise<void>;
+        stopped(): Promise<void>;
+      };
+      recv: {
+        readToEnd(size: number): Promise<Uint8Array>;
+        read(buffer: Uint8Array): Promise<bigint>;
+      };
+    }>;
+  }>;
   endpoint(): {
     connect(addr: { nodeId: string }, protocol: Buffer): Promise<{
       openBi(): Promise<{
@@ -740,6 +786,7 @@ interface Node {
         };
         recv: {
           readToEnd(size: number): Promise<Uint8Array>;
+          read(buffer: Uint8Array): Promise<bigint>;
         };
       }>;
     }>;
