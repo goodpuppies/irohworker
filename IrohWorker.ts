@@ -381,7 +381,12 @@ export class IrohWebWorker implements Worker {
     }
   }
 
-  private async _postMessageViaIroh(msg: unknown, retryCount = 0, maxRetries = 3, delayMs = 1000) {
+  private async _postMessageViaIroh(
+    msg: unknown,
+    retryCount = 0,
+    maxRetries = 3,
+    delayMs = 1000,
+  ): Promise<void> {
     if (!this._workerNode || this._terminated) return;
 
     const mainNode = IrohMain.node;
