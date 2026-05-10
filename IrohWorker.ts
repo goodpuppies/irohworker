@@ -38,8 +38,56 @@ export class IrohWebWorker implements Worker {
     } else {
       // Local worker mode
       this._worker = new Worker(urlOrNodeAddr, options);
+      this._attachLocalWorkerProcessGuards();
     }
     this._initPromise = this._initializeWorkerNode();
+  }
+
+  /**
+   * Map Deno's underlying `Worker` error events onto this wrapper and call `preventDefault`
+   * so a thrown worker does not take down the main process.
+   * @see https://html.spec.whatwg.org/multipage/workers.html#handler-workerglobalscope-onerror
+   */
+  private _attachLocalWorkerProcessGuards(): void {
+    const w = this._worker;
+    if (!w) return;
+
+    w.onerror = (e: ErrorEvent) => {
+      try {
+        e.preventDefault();
+      } catch {
+        // optional in some runtimes
+      }
+      console.error(
+        "[IrohWebWorker] Worker error:",
+        e.message,
+        e.filename,
+        e.lineno,
+        e.error,
+      );
+      this._dispatchToListeners("error", e);
+      const h = this.onerror;
+      if (typeof h === "function") {
+        try {
+          h.call(this as unknown as Worker, e);
+        } catch (cbErr) {
+          console.error("[IrohWebWorker] onerror callback failed:", cbErr);
+        }
+      }
+    };
+
+    w.onmessageerror = (e: MessageEvent) => {
+      console.error("[IrohWebWorker] messageerror (deserialize):", e);
+      this._dispatchToListeners("messageerror", e);
+      const h = this.onmessageerror;
+      if (typeof h === "function") {
+        try {
+          h.call(this as unknown as Worker, e);
+        } catch (cbErr) {
+          console.error("[IrohWebWorker] onmessageerror callback failed:", cbErr);
+        }
+      }
+    };
   }
 
   private async _initializeWorkerNode() {
